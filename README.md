@@ -28,7 +28,7 @@ Built incrementally, one milestone at a time.
 | M1 | Black-Scholes-Merton pricer and analytic greeks, CMake + 4-leg CI | **Done** |
 | M2 | Implied-vol solver; forward and discount recovered via put-call parity | **Done** |
 | M3 | Seeded synthetic option-chain generator with skew and term structure | **Done** |
-| M4 | SVI surface fit with butterfly and calendar arbitrage checks | Planned |
+| M4 | SVI surface fit with butterfly and calendar arbitrage checks | **Done** |
 | M5 | Position book, portfolio greeks, vega bucketed by tenor and strike | Planned |
 | M6 | Quoting engine: theo, risk-scaled width, inventory skew | Planned |
 | M7 | Simulation and P&L attribution; adverse-selection measurement | Planned |
@@ -211,6 +211,104 @@ R² diagnostic have something real to do.
 - The stylized facts as assertions: downward slope across strikes, skew
   flattening with maturity, at-the-money term structure mean-reverting.
 - The wing term's crossover — quadratic near the money, linear far out.
+
+## M4
+
+Fitting Gatheral's raw SVI parameterization of total implied variance to each
+expiry, then checking the assembled surface for both kinds of static
+arbitrage.
+
+```
+w(k) = a + b * (rho * (k - m) + sqrt((k - m)^2 + sigma^2))
+```
+
+Total variance rather than volatility, because that is the quantity the
+arbitrage conditions are naturally expressed in. Geometrically the function is
+a hyperbola — two straight asymptotes with slopes `b(rho-1)` and `b(rho+1)`,
+joined smoothly around a vertex near `k = m` — so every parameter maps onto
+something a trader already thinks about.
+
+**The fit is a two-dimensional search, not a five-dimensional one.** For any
+fixed vertex position and width `(m, sigma)`, SVI is *linear* in its remaining
+three parameters, so those fall out of an exact least-squares solve. That
+collapse is what makes the problem tractable, and it is why the outer search is
+a deterministic shrinking grid rather than a general-purpose optimizer: with a
+cheap two-dimensional objective there is no pathological geometry to defend
+against, and a grid gives byte-identical results across compilers.
+
+**Butterfly arbitrage via Durrleman's condition.** A slice is free of butterfly
+arbitrage exactly when
+
+```
+g(k) = (1 - k w'/(2w))^2 - (w'^2/4)(1/w + 1/4) + w''/2  >=  0
+```
+
+everywhere. What `g` really is: a quantity proportional to the risk-neutral
+probability density the slice implies. A negative value is a negative
+probability, which cashes out as a butterfly spread costing less than nothing.
+Checking the density directly is strictly stronger than spot-checking
+butterflies at the listed strikes, because it catches violations *between*
+strikes that no tradeable butterfly would reveal.
+
+**Calendar arbitrage in total variance, at fixed log-moneyness.** Total
+variance must never decrease with maturity. Both qualifiers matter: implied
+*volatility* routinely falls with maturity without any arbitrage — that is just
+the term structure — so a check phrased in volatility would raise false alarms
+on perfectly ordinary surfaces. There is a test asserting exactly that case.
+
+**Violations are reported, not repaired.** The fitter pulls parameters into the
+region where the slice is a valid variance curve — non-negative wing angle,
+correlation strictly inside (−1, 1), total variance never negative — but it
+deliberately does *not* force the butterfly condition. A violation is a fact
+about the market data, and silently massaging it away would destroy the signal
+a market maker most needs.
+
+Interpolation across maturities is linear in total variance, which is the only
+choice that cannot manufacture calendar arbitrage between two arbitrage-free
+slices.
+
+### Results
+
+The full pipeline on a generated chain — parity recovery, inversion, SVI fit,
+arbitrage checks (`./skewdesk_demo`):
+
+```
+     T   forward   pts        a        b     rho        m    sigma     rmse(w)      min g
+  0.02   4502.61    21 -0.00314  0.01013  -0.749  -0.2109   0.4674    1.95e-08     0.1489
+  0.08   4510.45    21 -0.00058  0.01073  -0.986  -0.1157   0.3265    5.12e-07     0.2554
+  0.25   4532.74    21  0.00030  0.02321  -0.841  -0.0999   0.3415    1.14e-05     0.2886
+  0.50   4565.73    21  0.00367  0.03991  -0.731  -0.0836   0.3256    3.28e-05     0.2985
+  1.00   4632.41    21  0.00700  0.08198  -0.576  -0.0838   0.3538    1.36e-04     0.2742
+  2.00   4768.72    21  0.00450  0.17694  -0.448  -0.0925   0.4073    5.53e-04     0.2241
+
+Calendar check: worst total-variance gap = +1.245377e-03 at k = +0.064
+Worst reproduction error vs the generating surface: 0.001286 absolute volatility
+```
+
+`rho` is negative at every expiry and its magnitude falls monotonically with
+maturity (−0.75 → −0.45) — the fit recovering the skew flattening that the
+generator put in, without ever being told the functional form. Durrleman's `g`
+stays comfortably positive across every slice, and the worst calendar gap is
+positive.
+
+### Testing
+
+66 tests. Added here:
+
+- **Exact recovery**: fitted against observations sampled from a known SVI
+  curve, the fit reproduces it to an RMSE below 1e-8 in total variance.
+- **Analytic derivatives against finite differences**, the same discipline used
+  on the M1 greeks — `w'` and `w''` feed Durrleman's condition, so an error
+  there would silently disable the arbitrage check.
+- **A confirmed butterfly-violating slice is detected**, and the fitter reports
+  `ButterflyArbitrage` while still returning the parameters for inspection.
+- **A falling-volatility term structure is not flagged** as calendar arbitrage,
+  pinning the total-variance-versus-volatility distinction.
+- **Interpolation never decreases total variance** across the whole maturity
+  range.
+- The end-to-end fit of a generated chain is required to come out free of both
+  arbitrage types, and to reproduce the generating surface to within 2e-3
+  absolute volatility.
 
 ## Build
 
