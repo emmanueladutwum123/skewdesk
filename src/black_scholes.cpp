@@ -9,13 +9,13 @@ constexpr double kInvSqrt2 = 0.70710678118654752440;
 constexpr double kInvSqrt2Pi = 0.39894228040143267794;
 
 // True when the payoff carries no uncertainty, so d1/d2 -- which divide by
-// sigma*sqrt(T) -- are undefined rather than merely large. Non-positive spot
-// or strike are folded in here too: both make log(F/K) undefined, and both
-// have unambiguous limiting values that the deterministic branch computes
-// correctly (a zero-spot call is worthless; a zero-strike call is the
+// sigma*sqrt(T) -- are undefined rather than merely large. Non-positive
+// forward or strike are folded in here too: both make log(F/K) undefined, and
+// both have unambiguous limiting values that the deterministic branch computes
+// correctly (a zero-forward call is worthless; a zero-strike call is the
 // discounted forward).
-[[nodiscard]] bool is_deterministic(const BlackScholesInputs& in) noexcept {
-  return in.time <= 0.0 || in.volatility <= 0.0 || in.spot <= 0.0 || in.strike <= 0.0;
+[[nodiscard]] bool is_deterministic(const ForwardInputs& in) noexcept {
+  return in.time <= 0.0 || in.volatility <= 0.0 || in.forward <= 0.0 || in.strike <= 0.0;
 }
 
 struct Moments {
@@ -23,9 +23,9 @@ struct Moments {
   double d2;
 };
 
-[[nodiscard]] Moments moments(const BlackScholesInputs& in, double forward) noexcept {
+[[nodiscard]] Moments moments(const ForwardInputs& in) noexcept {
   const double std_dev = in.volatility * std::sqrt(in.time);
-  const double d1 = (std::log(forward / in.strike) + 0.5 * std_dev * std_dev) / std_dev;
+  const double d1 = (std::log(in.forward / in.strike) + 0.5 * std_dev * std_dev) / std_dev;
   return Moments{d1, d1 - std_dev};
 }
 
@@ -51,41 +51,61 @@ double discount_factor(const BlackScholesInputs& in) noexcept {
   return std::exp(-in.rate * in.time);
 }
 
-double price(const BlackScholesInputs& in, OptionType type) noexcept {
-  const double forward = forward_price(in);
-  const double df = discount_factor(in);
+ForwardInputs to_forward(const BlackScholesInputs& in) noexcept {
+  return ForwardInputs{.forward = forward_price(in),
+                       .strike = in.strike,
+                       .discount_factor = discount_factor(in),
+                       .volatility = in.volatility,
+                       .time = in.time};
+}
 
+double price(const ForwardInputs& in, OptionType type) noexcept {
   if (is_deterministic(in)) {
     const double intrinsic =
-        (type == OptionType::Call) ? forward - in.strike : in.strike - forward;
-    return df * std::fmax(intrinsic, 0.0);
+        (type == OptionType::Call) ? in.forward - in.strike : in.strike - in.forward;
+    return in.discount_factor * std::fmax(intrinsic, 0.0);
   }
 
-  const auto [d1, d2] = moments(in, forward);
+  const auto [d1, d2] = moments(in);
 
   if (type == OptionType::Call) {
-    return df * (forward * norm_cdf(d1) - in.strike * norm_cdf(d2));
+    return in.discount_factor * (in.forward * norm_cdf(d1) - in.strike * norm_cdf(d2));
   }
-  return df * (in.strike * norm_cdf(-d2) - forward * norm_cdf(-d1));
+  return in.discount_factor * (in.strike * norm_cdf(-d2) - in.forward * norm_cdf(-d1));
+}
+
+double forward_vega(const ForwardInputs& in) noexcept {
+  if (is_deterministic(in)) {
+    return 0.0;
+  }
+  return in.discount_factor * in.forward * norm_pdf(moments(in).d1) * std::sqrt(in.time);
+}
+
+// The spot parameterization is a thin adapter over the forward one: the two
+// are algebraically identical, and keeping a single implementation means the
+// parity-recovered forward used by later milestones exercises exactly the same
+// code path as the textbook spot form the tests pin down.
+double price(const BlackScholesInputs& in, OptionType type) noexcept {
+  return price(to_forward(in), type);
 }
 
 Greeks greeks(const BlackScholesInputs& in, OptionType type) noexcept {
   Greeks g{};
 
-  const double forward = forward_price(in);
-  const double df = discount_factor(in);
+  const ForwardInputs fwd_in = to_forward(in);
+  const double df = fwd_in.discount_factor;
   const double div_df = std::exp(-in.dividend * in.time);
 
-  if (is_deterministic(in)) {
+  if (is_deterministic(fwd_in) || in.spot <= 0.0) {
     const bool itm =
-        (type == OptionType::Call) ? forward > in.strike : forward < in.strike;
+        (type == OptionType::Call) ? fwd_in.forward > in.strike : fwd_in.forward < in.strike;
     if (itm) {
       g.delta = (type == OptionType::Call) ? div_df : -div_df;
     }
     return g;
   }
 
-  const auto [d1, d2] = moments(in, forward);
+  const auto [d1, d2] = moments(fwd_in);
   const double sqrt_t = std::sqrt(in.time);
   const double pdf_d1 = norm_pdf(d1);
 

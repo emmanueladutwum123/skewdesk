@@ -12,6 +12,8 @@ FetchContent_MakeAvailable(googletest)
 
 add_executable(skewdesk_tests
   test_black_scholes.cpp
+  test_implied_volatility.cpp
+  test_parity.cpp
 )
 target_link_libraries(skewdesk_tests PRIVATE skewdesk GTest::gtest_main)
 target_compile_options(skewdesk_tests PRIVATE -Wall -Wextra)

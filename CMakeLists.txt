@@ -17,6 +17,8 @@ option(SD_BUILD_BENCHMARKS "Build Google Benchmark microbenchmarks" OFF)
 
 add_library(skewdesk STATIC
   src/black_scholes.cpp
+  src/implied_volatility.cpp
+  src/parity.cpp
 )
 
 target_include_directories(skewdesk PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)

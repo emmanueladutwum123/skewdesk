@@ -38,8 +38,32 @@ struct Greeks {
   double rho{};
 };
 
+// The same contract expressed in the terms a market actually supplies: a
+// forward and a discount factor, rather than a spot price plus an assumed rate
+// and dividend yield. Neither of those last two is observable for an index
+// option -- what is observable is the option chain itself, from which both can
+// be recovered (see parity.hpp). This is the parameterization everything built
+// on top of the pricer consumes.
+struct ForwardInputs {
+  double forward{};
+  double strike{};
+  double discount_factor{};
+  double volatility{};
+  double time{};
+};
+
 [[nodiscard]] double norm_pdf(double x) noexcept;
 [[nodiscard]] double norm_cdf(double x) noexcept;
+
+[[nodiscard]] ForwardInputs to_forward(const BlackScholesInputs& in) noexcept;
+[[nodiscard]] double price(const ForwardInputs& in, OptionType type) noexcept;
+
+// dPrice/dVolatility on the forward parameterization, in the same units as
+// Greeks::vega -- and numerically identical to it for equivalent inputs, since
+// discount_factor * forward is exactly spot * exp(-dividend * time). Exposed
+// on its own because the implied-vol solver needs this one derivative and
+// nothing else from the greek set.
+[[nodiscard]] double forward_vega(const ForwardInputs& in) noexcept;
 
 // The forward price of the underlying at expiry, and the discount factor
 // applied to the payoff.
