@@ -33,6 +33,79 @@ std::vector<ParityQuote> pair_by_strike(const ExpirySlice& slice) {
 
 }  // namespace
 
+namespace {
+
+// Piecewise-linear interpolation in log space over nodes that include the
+// known value at maturity zero, with the last segment's slope continued
+// beyond the final node.
+[[nodiscard]] double interpolate_log_linear(double time, double value_at_zero,
+                                            std::span<const double> times,
+                                            std::span<const double> log_values) noexcept {
+  if (times.empty()) {
+    return value_at_zero;
+  }
+  if (time <= 0.0) {
+    return value_at_zero;
+  }
+
+  const double log_at_zero = std::log(value_at_zero);
+
+  if (time <= times.front()) {
+    const double position = time / times.front();
+    return std::exp(log_at_zero + position * (log_values.front() - log_at_zero));
+  }
+
+  for (std::size_t i = 1; i < times.size(); ++i) {
+    if (time <= times[i]) {
+      const double span = times[i] - times[i - 1];
+      const double position = (span > 0.0) ? (time - times[i - 1]) / span : 0.0;
+      return std::exp(log_values[i - 1] + position * (log_values[i] - log_values[i - 1]));
+    }
+  }
+
+  if (times.size() == 1) {
+    const double rate = (log_values.front() - log_at_zero) / times.front();
+    return std::exp(log_at_zero + rate * time);
+  }
+
+  const std::size_t last = times.size() - 1;
+  const double span = times[last] - times[last - 1];
+  const double rate = (span > 0.0) ? (log_values[last] - log_values[last - 1]) / span : 0.0;
+  return std::exp(log_values[last] + rate * (time - times[last]));
+}
+
+}  // namespace
+
+double VolSurface::forward_at(double time) const noexcept {
+  if (slices.empty() || spot <= 0.0) {
+    return spot;
+  }
+  std::vector<double> times;
+  std::vector<double> log_forwards;
+  times.reserve(slices.size());
+  log_forwards.reserve(slices.size());
+  for (const SurfaceSlice& slice : slices) {
+    times.push_back(slice.time);
+    log_forwards.push_back(std::log(slice.forward));
+  }
+  return interpolate_log_linear(time, spot, times, log_forwards);
+}
+
+double VolSurface::discount_factor_at(double time) const noexcept {
+  if (slices.empty()) {
+    return 1.0;
+  }
+  std::vector<double> times;
+  std::vector<double> log_discounts;
+  times.reserve(slices.size());
+  log_discounts.reserve(slices.size());
+  for (const SurfaceSlice& slice : slices) {
+    times.push_back(slice.time);
+    log_discounts.push_back(std::log(slice.discount_factor));
+  }
+  return interpolate_log_linear(time, 1.0, times, log_discounts);
+}
+
 double VolSurface::total_variance_at(double time, double log_moneyness) const noexcept {
   if (slices.empty() || time <= 0.0) {
     return 0.0;
@@ -118,6 +191,7 @@ CalendarCheck check_calendar(std::span<const SurfaceSlice> slices, int samples) 
 
 VolSurface fit_surface(const OptionChain& chain, const SurfaceFitSettings& settings) {
   VolSurface surface{};
+  surface.spot = chain.spot;
 
   for (const ExpirySlice& expiry : chain.expiries) {
     const ParityFit parity = fit_forward_and_discount(pair_by_strike(expiry));

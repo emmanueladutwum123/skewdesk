@@ -56,6 +56,17 @@ struct ForwardInputs {
 [[nodiscard]] double norm_cdf(double x) noexcept;
 
 [[nodiscard]] ForwardInputs to_forward(const BlackScholesInputs& in) noexcept;
+
+// The inverse, given a spot price. Exact rather than approximate: the discount
+// factor determines the rate, and the forward then determines the dividend
+// yield. Its purpose is to let code that works in market coordinates reuse the
+// spot-parameterization greeks -- which are the ones validated against finite
+// differences -- instead of restating those formulas in forward terms.
+//
+// Returns a zeroed struct if the inputs are not well-formed (non-positive
+// spot, forward, discount factor, or maturity), since no rate or yield exists
+// to recover in those cases.
+[[nodiscard]] BlackScholesInputs from_forward(double spot, const ForwardInputs& in) noexcept;
 [[nodiscard]] double price(const ForwardInputs& in, OptionType type) noexcept;
 
 // dPrice/dVolatility on the forward parameterization, in the same units as

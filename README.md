@@ -29,7 +29,7 @@ Built incrementally, one milestone at a time.
 | M2 | Implied-vol solver; forward and discount recovered via put-call parity | **Done** |
 | M3 | Seeded synthetic option-chain generator with skew and term structure | **Done** |
 | M4 | SVI surface fit with butterfly and calendar arbitrage checks | **Done** |
-| M5 | Position book, portfolio greeks, vega bucketed by tenor and strike | Planned |
+| M5 | Position book, portfolio greeks, vega bucketed by tenor and strike | **Done** |
 | M6 | Quoting engine: theo, risk-scaled width, inventory skew | Planned |
 | M7 | Simulation and P&L attribution; adverse-selection measurement | Planned |
 | M8 | Benchmarks, `DESIGN.md`, `BENCHMARKS.md` | Planned |
@@ -309,6 +309,79 @@ positive.
 - The end-to-end fit of a generated chain is required to come out free of both
   arbitrage types, and to reproduce the generating surface to within 2e-3
   absolute volatility.
+
+## M5
+
+A position book netted by contract, marked against the fitted surface, with
+risk aggregated the way an options desk actually looks at it.
+
+**The point of this milestone is that a single vega number is not risk
+management.** A book long 1,000 vega in the front month and short 1,000 vega in
+the two-year has net vega of zero and an enormous position — it is short the
+term structure, and any differential move hurts. The same is true across
+strikes: long downside vega against short upside vega is a skew position, not a
+flat one. So vega is broken out on a tenor × log-moneyness grid, and reported
+alongside a **gross** figure that sums the absolute value of each cell. The gap
+between net and gross is exactly the offsetting exposure the aggregate hides.
+
+On the demo book, net vega is **1.3% of gross**:
+
+```
+Book risk  --  5 positions priced, 0 skipped
+  value -1677166   delta -6390.9   gamma +100.3226   theta/day -62890
+  net vega -739371   term-weighted vega +33567893   GROSS vega 58304207
+
+Vega by tenor x log-moneyness (net vega is 1.3% of gross)
+                  k < -0.10 [-.10, -.03)  [-.03, .03)   [.03, .10)    k >= 0.10
+       [0, 1M)            0            0     28782418            0            0   | +28782418
+      [1M, 3M)            0            0            0            0            0   | +0
+      [3M, 6M)     -8300626            0            0            0            0   | -8300626
+      [6M, 1Y)            0            0            0            0            0   | +0
+      [1Y, 2Y)            0            0    -10305967            0            0   | -10305967
+     [2Y, inf)            0            0            0    -10915196            0   | -10915196
+```
+
+**Term-weighted vega.** A vega point at three weeks is not the same risk as one
+at two years, because short-dated implied volatility moves far more. Vega is
+therefore also reported scaled by `sqrt(reference / T)` against a three-month
+reference, which puts the two on a comparable footing.
+
+**Greeks are sticky-strike, and that is stated rather than buried.** They are
+Black-Scholes greeks evaluated at the surface's volatility with the surface
+held fixed, so delta excludes the way implied volatility at a given strike
+tends to move when spot moves. The alternative depends on a view about how the
+surface travels; encoding such a view silently inside a number labelled "delta"
+would be worse than excluding it openly.
+
+**Forwards and discount factors interpolate in log space**, because that is
+where they are linear — `ln(forward)` grows at the cost-of-carry rate and
+`ln(discount)` falls at the interest rate, so a straight line in log space is a
+constant rate between nodes. Maturity zero is a known node for both (the
+forward is the spot, the discount factor is one), so the short end is
+interpolated rather than extrapolated.
+
+The risk code reuses the M1 spot-parameterization greeks via an exact
+conversion from market coordinates, rather than restating the formulas in
+forward terms — the M1 versions are the ones validated against finite
+differences, so restating them would mean re-earning that confidence.
+
+### Testing
+
+81 tests. Added here:
+
+- **Vega against a finite difference of the book's own mark**, by shifting a
+  flat surface's volatility — validating aggregation and scaling together, not
+  just the per-contract formula.
+- **Bucket sums reconcile**: by-tenor, by-moneyness, and the full grid each sum
+  to net vega.
+- **The offsetting-position case is asserted directly** — net vega round to
+  zero while gross vega stays near twice the leg size, with the two legs
+  landing in different tenor buckets with opposite signs.
+- Log-space forward and discount interpolation reproduce a constant rate
+  exactly, including back to maturity zero and beyond the final node.
+- Book netting, including that a contract netted flat is removed rather than
+  left as a zero row, and that calls and puts at one strike stay distinct.
+- Malformed positions are skipped and counted rather than silently mispriced.
 
 ## Build
 

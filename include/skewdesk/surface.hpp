@@ -59,11 +59,26 @@ struct SurfaceFitSettings {
 };
 
 struct VolSurface {
+  double spot{};
   std::vector<SurfaceSlice> slices{};
   CalendarCheck calendar{};
   SurfaceStatus status{SurfaceStatus::NoUsableExpiries};
 
   [[nodiscard]] bool ok() const noexcept { return status == SurfaceStatus::Success; }
+
+  // The forward and discount factor at an arbitrary maturity.
+  //
+  // Both are interpolated in log space against maturity, because that is where
+  // they are actually linear: ln(forward) grows at the cost-of-carry rate and
+  // ln(discount) falls at the interest rate, so a straight line in log space
+  // is a constant rate between nodes. Interpolating either level directly
+  // would imply rates that wander between quoted expiries.
+  //
+  // Maturity zero is a known node for both -- the forward is the spot and the
+  // discount factor is one -- so the short end is interpolated rather than
+  // extrapolated. Beyond the last expiry the final segment's rates continue.
+  [[nodiscard]] double forward_at(double time) const noexcept;
+  [[nodiscard]] double discount_factor_at(double time) const noexcept;
 
   // Black-Scholes volatility at an arbitrary maturity and log-moneyness.
   //

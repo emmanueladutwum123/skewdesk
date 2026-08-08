@@ -1,9 +1,11 @@
 #include "skewdesk/chain.hpp"
+#include "skewdesk/portfolio.hpp"
 #include "skewdesk/surface.hpp"
 
 #include <cmath>
 #include <cstdio>
 #include <initializer_list>
+#include <vector>
 
 // Runs the whole pipeline end to end: generate a chain from a known
 // volatility surface, recover each expiry's forward and discount factor from
@@ -56,6 +58,44 @@ int main() {
   std::printf("Worst reproduction error vs the generating surface: %.6f absolute"
               " volatility (%.2f vol points) at T=%.2f, k=%+.3f\n",
               worst_vol_error, worst_vol_error * 100.0, worst_time, worst_k);
+
+  // A book whose net vega says almost nothing about the risk it carries: long
+  // front-month volatility against short two-year, plus a downside skew
+  // position. Both are invisible in the aggregate and obvious in the grid.
+  skewdesk::PositionBook book;
+  book.add({.time = 0.08, .strike = 4400.0, .type = skewdesk::OptionType::Put}, 400.0);
+  book.add({.time = 0.08, .strike = 4600.0, .type = skewdesk::OptionType::Call}, 250.0);
+  book.add({.time = 0.25, .strike = 4100.0, .type = skewdesk::OptionType::Put}, -180.0);
+  book.add({.time = 1.00, .strike = 4500.0, .type = skewdesk::OptionType::Call}, -60.0);
+  book.add({.time = 2.00, .strike = 5200.0, .type = skewdesk::OptionType::Call}, -45.0);
+
+  const skewdesk::RiskSettings settings{};
+  const skewdesk::PortfolioRisk risk = skewdesk::compute_risk(book, surface, settings);
+
+  std::printf("\n\nBook risk  --  %d positions priced, %d skipped\n", risk.positions_priced,
+              risk.positions_skipped);
+  std::printf("  value %+.0f   delta %+.1f   gamma %+.4f   theta/day %+.0f\n", risk.value,
+              risk.delta, risk.gamma, risk.theta / 365.0);
+  std::printf("  net vega %+.0f   term-weighted vega %+.0f   GROSS vega %.0f\n", risk.vega,
+              risk.weighted_vega, risk.gross_vega);
+
+  // Buckets are half-open [lower, upper), so a contract sitting exactly on an
+  // edge belongs to the bucket above it.
+  std::printf("\nVega by tenor x log-moneyness (net vega is %.1f%% of gross)\n",
+              100.0 * std::fabs(risk.vega) / risk.gross_vega);
+  std::printf("%14s %12s %12s %12s %12s %12s\n", "", "k < -0.10", "[-.10, -.03)",
+              "[-.03, .03)", "[.03, .10)", "k >= 0.10");
+
+  const std::vector<const char*> tenor_labels = {"     [0, 1M)", "    [1M, 3M)",
+                                                 "    [3M, 6M)", "    [6M, 1Y)",
+                                                 "    [1Y, 2Y)", "   [2Y, inf)"};
+  for (std::size_t t = 0; t < risk.vega_buckets.grid.size(); ++t) {
+    std::printf("%14s", tenor_labels[t]);
+    for (const double cell : risk.vega_buckets.grid[t]) {
+      std::printf(" %12.0f", cell);
+    }
+    std::printf("   | %+.0f\n", risk.vega_buckets.by_tenor[t]);
+  }
 
   return 0;
 }

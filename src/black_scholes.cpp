@@ -59,6 +59,20 @@ ForwardInputs to_forward(const BlackScholesInputs& in) noexcept {
                        .time = in.time};
 }
 
+BlackScholesInputs from_forward(double spot, const ForwardInputs& in) noexcept {
+  if (spot <= 0.0 || in.forward <= 0.0 || in.discount_factor <= 0.0 || in.time <= 0.0) {
+    return BlackScholesInputs{};
+  }
+  const double rate = -std::log(in.discount_factor) / in.time;
+  const double dividend = rate - std::log(in.forward / spot) / in.time;
+  return BlackScholesInputs{.spot = spot,
+                            .strike = in.strike,
+                            .rate = rate,
+                            .dividend = dividend,
+                            .volatility = in.volatility,
+                            .time = in.time};
+}
+
 double price(const ForwardInputs& in, OptionType type) noexcept {
   if (is_deterministic(in)) {
     const double intrinsic =
