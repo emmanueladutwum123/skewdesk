@@ -19,6 +19,7 @@ add_library(skewdesk STATIC
   src/black_scholes.cpp
   src/implied_volatility.cpp
   src/parity.cpp
+  src/chain.cpp
 )
 
 target_include_directories(skewdesk PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)

@@ -27,7 +27,7 @@ Built incrementally, one milestone at a time.
 |---|---|---|
 | M1 | Black-Scholes-Merton pricer and analytic greeks, CMake + 4-leg CI | **Done** |
 | M2 | Implied-vol solver; forward and discount recovered via put-call parity | **Done** |
-| M3 | Seeded synthetic option-chain generator with skew and term structure | Planned |
+| M3 | Seeded synthetic option-chain generator with skew and term structure | **Done** |
 | M4 | SVI surface fit with butterfly and calendar arbitrage checks | Planned |
 | M5 | Position book, portfolio greeks, vega bucketed by tenor and strike | Planned |
 | M6 | Quoting engine: theo, risk-scaled width, inventory skew | Planned |
@@ -145,6 +145,72 @@ right.
   behaviour rather than something rediscovered later.
 - No-arbitrage rejection: quotes below intrinsic, above the ceiling, and
   malformed contracts each return their own status rather than a wrong number.
+
+## M3
+
+A seeded generator producing full chains — multiple expiries, each with its own
+forward, discount factor, strike ladder, and two-sided markets on both sides of
+every strike. Real chain data is not reliably licensable for CI, so everything
+downstream is tested against deterministic synthetic input, the same approach
+used elsewhere in this portfolio.
+
+**The generator deliberately does not use SVI**, even though M4 fits SVI. If
+the two shared a functional form, M4's tests would only prove that a model can
+recover its own parameters — circular, and silent on whether the fit copes with
+a surface shaped by something other than itself. Real chains are not generated
+by SVI either. The generator instead uses an empirical form in log-moneyness
+`k = ln(strike / forward)`:
+
+```
+sigma(k, T) = atm(T) + slope(T) * k + curvature * (hypot(k, w) - w)
+```
+
+with two stylized facts of index options built in: the slope is negative
+(downside strikes carry higher volatility, because index options are priced by
+people hedging crash risk rather than by symmetric speculation), and it decays
+as `1/sqrt(T)`, so a three-week skew is steep and a two-year skew nearly flat.
+
+**The wing term is a smoothed absolute value, and that detail is load-bearing.**
+The obvious choice — a plain quadratic in `k` — makes total variance grow like
+`k⁴`, which violates Lee's moment formula. The consequence is not subtle. At
+two years and 2.2× the forward, it lifted implied volatility fast enough that
+call prices began *rising* with strike:
+
+```
+K= 8325  vol=0.250  price=49.45
+K= 9025  vol=0.274  price=48.00
+K= 9775  vol=0.302  price=50.50   <- rising
+K=10600  vol=0.334  price=56.72   <- rising
+```
+
+That is a call spread with negative cost and a non-negative payoff — free
+money, and a chain M4 could never legitimately fit. `hypot(k, w) - w` behaves
+like `k²/(2w)` near the money, so the smile there is unchanged, but grows
+linearly in `|k|` in the wings, which keeps prices monotone and convex across
+the entire generated band.
+
+**Markets are quoted in volatility terms.** The half-spread is
+`vega × half_spread_vol_points`, floored at a minimum tick, which automatically
+produces narrow price-space markets in the wings and wider ones near the money
+— the opposite of a fixed price spread, and what real chains actually look
+like. Optional per-contract volatility noise perturbs each side independently,
+so put-call parity stops holding exactly and the M2 regression's averaging and
+R² diagnostic have something real to do.
+
+### Testing
+
+45 tests. Added here:
+
+- **Static-arbitrage checks on every generated chain**: call prices strictly
+  decreasing in strike, and convex against the general non-uniform-ladder
+  chord condition. This is what caught the quadratic wing blow-up.
+- **Full M2 + M3 pipeline**: generate a chain from a known surface, recover the
+  forward and discount from the chain alone, invert the out-of-the-money side,
+  and compare against the surface that produced it.
+- Reproducibility from the seed, and that a different seed actually differs.
+- The stylized facts as assertions: downward slope across strikes, skew
+  flattening with maturity, at-the-money term structure mean-reverting.
+- The wing term's crossover — quadratic near the money, linear far out.
 
 ## Build
 
