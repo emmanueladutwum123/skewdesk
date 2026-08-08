@@ -1,5 +1,6 @@
 #include "skewdesk/chain.hpp"
 #include "skewdesk/portfolio.hpp"
+#include "skewdesk/quoting.hpp"
 #include "skewdesk/surface.hpp"
 
 #include <cmath>
@@ -95,6 +96,45 @@ int main() {
       std::printf(" %12.0f", cell);
     }
     std::printf("   | %+.0f\n", risk.vega_buckets.by_tenor[t]);
+  }
+
+  // The same ladder quoted twice: once from a flat book, once against the
+  // book above. The difference is the whole point of the quoting engine --
+  // markets lean away from the risk already held, and the side that would add
+  // to a maxed-out bucket is withdrawn rather than shown at a silly price.
+  const std::vector<skewdesk::ContractId> ladder = {
+      {.time = 0.08, .strike = 4300.0, .type = skewdesk::OptionType::Put},
+      {.time = 0.08, .strike = 4500.0, .type = skewdesk::OptionType::Call},
+      {.time = 0.08, .strike = 4700.0, .type = skewdesk::OptionType::Call},
+      {.time = 0.25, .strike = 4100.0, .type = skewdesk::OptionType::Put},
+      {.time = 1.00, .strike = 4500.0, .type = skewdesk::OptionType::Call},
+      {.time = 2.00, .strike = 5200.0, .type = skewdesk::OptionType::Call}};
+
+  const skewdesk::PortfolioRisk flat_risk =
+      skewdesk::compute_risk(skewdesk::PositionBook{}, surface, settings);
+  const skewdesk::QuoteSettings quote_settings{};
+  const std::vector<skewdesk::Quote> flat_quotes =
+      skewdesk::quote_ladder(ladder, surface, flat_risk, quote_settings);
+  const std::vector<skewdesk::Quote> live_quotes =
+      skewdesk::quote_ladder(ladder, surface, risk, quote_settings);
+
+  std::printf("\n\nQuoting the ladder, flat book vs the book above\n");
+  std::printf("%6s %8s %5s %9s %9s %9s %8s %9s %9s %8s %7s\n", "T", "strike", "type",
+              "theo vol", "flat bid", "flat ask", "util", "live bid", "live ask", "bid sz",
+              "ask sz");
+  std::printf("%s\n",
+              "--------------------------------------------------------------------------"
+              "---------------------");
+
+  for (std::size_t i = 0; i < ladder.size(); ++i) {
+    const skewdesk::Quote& flat = flat_quotes[i];
+    const skewdesk::Quote& live = live_quotes[i];
+    std::printf("%6.2f %8.0f %5s %9.4f %9.2f %9.2f %8.2f %9.2f %9.2f %8.0f %7.0f\n",
+                live.contract.time, live.contract.strike,
+                live.contract.type == skewdesk::OptionType::Call ? "call" : "put",
+                live.theoretical_volatility, flat.bid, flat.ask,
+                live.inventory_utilisation, live.bid, live.ask, live.bid_size,
+                live.ask_size);
   }
 
   return 0;

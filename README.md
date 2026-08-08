@@ -30,7 +30,7 @@ Built incrementally, one milestone at a time.
 | M3 | Seeded synthetic option-chain generator with skew and term structure | **Done** |
 | M4 | SVI surface fit with butterfly and calendar arbitrage checks | **Done** |
 | M5 | Position book, portfolio greeks, vega bucketed by tenor and strike | **Done** |
-| M6 | Quoting engine: theo, risk-scaled width, inventory skew | Planned |
+| M6 | Quoting engine: theo, risk-scaled width, inventory skew | **Done** |
 | M7 | Simulation and P&L attribution; adverse-selection measurement | Planned |
 | M8 | Benchmarks, `DESIGN.md`, `BENCHMARKS.md` | Planned |
 
@@ -382,6 +382,82 @@ differences, so restating them would mean re-earning that confidence.
 - Book netting, including that a contract netted flat is removed rather than
   left as a zero row, and that calls and puts at one strike stay distinct.
 - Malformed positions are skipped and counted rather than silently mispriced.
+
+## M6
+
+Two-sided markets built from the fitted surface, leaning away from the risk the
+book is already carrying.
+
+**Everything about the quote is decided in volatility terms and converted to
+price at the end**, via the option's own vega — the same convention the chain
+generator uses, and the one desks actually work in. That conversion is what
+makes wing markets narrow in price and near-the-money markets wide, without
+anyone coding a rule for it.
+
+**Inventory skew is the reservation price idea, applied to vega.** A book
+already long volatility in a bucket quotes that bucket *lower* on both sides,
+so the flow it attracts sells to the maker rather than buying from it. This is
+structurally the same mechanism as the reservation price in the
+Avellaneda–Stoikov market-making model, moved from delta inventory to vega
+inventory: the maker is not predicting where volatility goes, only arranging
+for the trades it does get to lean toward flat.
+
+**At the limit the adding side is withdrawn, not merely priced badly.** A maker
+at its risk limit pulls the bid; it does not keep showing one at a silly price
+and hope nobody hits it. Sizes taper on the side that would add to the position
+and stay full on the side that would reduce it.
+
+**Width has three sources**, all in volatility points: a competitive base, a
+term that grows with inventory utilisation, and — the interesting one — a term
+derived from the slice's own SVI fit residual. That is the surface telling the
+quoter how much to trust it. An expiry whose fit left large residuals is one
+where theo is genuinely uncertain, and quoting it as tightly as a clean expiry
+would be quoting confidence that does not exist. Uncertainty widens the market;
+it does not skew it.
+
+**One floor matters more than it looks.** A width set purely in volatility
+collapses to nothing in price terms exactly where vega is negligible — deep
+wings and near expiry — which is precisely where a maker is most exposed to
+being picked off. A minimum price half-width prevents a one-tick market on a
+lottery ticket. Where the option is worthless the bid clamps at zero instead,
+giving a 0.00 bid against a small offer, which is what a real market in that
+contract looks like.
+
+The same ladder quoted from a flat book and against the book above
+(`./skewdesk_demo`):
+
+```
+     T   strike  type  theo vol  flat bid  flat ask     util  live bid  live ask   bid sz  ask sz
+  0.08     4300   put    0.1687     15.92     18.93     0.00     15.92     18.93       50      50
+  0.08     4500  call    0.1552     81.40     86.48     1.00     68.76     83.95        0      50
+  0.08     4700  call    0.1434     13.54     16.64     0.00     13.54     16.64       50      50
+  0.25     4100   put    0.1815     23.91     28.63    -0.42     24.84     33.73       50      29
+  1.00     4500  call    0.1837    378.73    397.17    -0.52    383.15    419.32       50      24
+  2.00     5200  call    0.1858    292.41    320.27    -0.55    299.01    353.55       50      23
+```
+
+The maxed-out bucket (`util 1.00`) has its bid withdrawn entirely and its
+market skewed down by more than twelve points. The short buckets skew up and
+taper their offers. The untouched buckets are quoted exactly as they would be
+from a flat book.
+
+### Testing
+
+95 tests. Added here:
+
+- Skew direction and magnitude in both directions, and that it **saturates**
+  rather than growing without bound past the limit.
+- **The adding side is withdrawn at the limit** while the reducing side stays
+  at full size.
+- Width grows with inventory utilisation, and separately with slice fit
+  uncertainty — with an assertion that uncertainty widens *without* skewing.
+- Both branches of the price floor: the full two-sided floor on a deep
+  in-the-money contract with negligible vega, and the zero-bid case on a
+  worthless wing.
+- Bid non-negative and strictly below ask across a grid of strikes, tenors and
+  option types.
+- A risk grid bucketed differently from the quote settings is **reported**
+  rather than silently read from the wrong cell.
 
 ## Build
 

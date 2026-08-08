@@ -18,6 +18,7 @@ add_executable(skewdesk_tests
   test_svi.cpp
   test_surface.cpp
   test_portfolio.cpp
+  test_quoting.cpp
 )
 target_link_libraries(skewdesk_tests PRIVATE skewdesk GTest::gtest_main)
 target_compile_options(skewdesk_tests PRIVATE -Wall -Wextra)
