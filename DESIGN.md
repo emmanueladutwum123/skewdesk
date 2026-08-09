@@ -1,0 +1,301 @@
+# Design
+
+Why this is built the way it is, decision by decision, and what the process
+caught along the way.
+
+## The through-line
+
+Every milestone exists to make the last one possible. The pricer supports the
+inversion; the inversion supports the surface fit; the surface supports risk;
+risk supports quoting; quoting supports the simulation. And the simulation
+exists to answer one question — **where does a market maker's money actually
+come from, and where does it leak out?**
+
+That question is why the project is shaped around a P&L decomposition rather
+than around a pricing library. A pricing library is a means here, not the end.
+
+---
+
+## Pricing
+
+**Pricing is expressed on a forward basis internally.** The forward and spot
+formulations are algebraically identical, but only the forward one survives
+contact with real chain data. For an equity index neither the financing rate
+nor the dividend stream is directly observable; the option chain prices them
+jointly, and both get *recovered* from it. Structuring the pricer this way in
+M1 meant M2 could substitute a parity-implied forward without touching the
+pricing core. The spot parameterization remains as a thin adapter, so the
+textbook form the tests pin down and the market form everything else uses share
+one implementation.
+
+**The normal CDF uses `erfc`, not `erf`.** The familiar
+`0.5 * (1 + erf(x/√2))` adds 1 to something within an ulp of −1 when `x` is
+well below zero, and catastrophically cancels. That is exactly where deep
+out-of-the-money options live, and they are a large share of any index chain.
+`0.5 * erfc(-x/√2)` stays accurate far into the left tail; there is a test
+pinning `norm_cdf(-10)` against its reference value, where the naive form
+returns a flat zero.
+
+**Degenerate inputs are limit cases, not errors.** Zero time, volatility, spot
+or strike all make `d1` and `d2` undefined rather than merely large, but each
+has an unambiguous limiting value. The pricer returns discounted intrinsic on
+the forward. `greeks` returns the dividend-discounted step function for delta
+and zero elsewhere — exact for gamma and vega, and a documented convention for
+theta and rho at the kink.
+
+## Reading a market
+
+**Put-call parity is fitted as a regression, not inverted from one pair.**
+`call − put = discount × (forward − strike)`, so regressing `call − put` on
+strike across an expiry gives a line whose slope is `−discount` and whose
+intercept is `discount × forward`. Every strike is an independent observation
+of the same two unknowns, so fitting across all of them averages away quote
+noise, and the R² becomes a free data-quality signal: parity is an exact
+arbitrage relation, so a fit materially below 1 means the quotes disagree with
+each other. A non-negative slope is rejected outright rather than returned as a
+negative discount factor.
+
+The accumulation is centred rather than using the raw sum-of-squares form.
+Index strikes are large numbers in a narrow band, so `Σx²` and `n·x̄²` agree to
+many digits and subtracting them discards most of the variance's precision.
+
+**Inversion is Newton-Raphson safeguarded by bisection.** A Newton step is
+taken only when it lands inside the current bracket and is at least halving the
+interval. The rejection conditions are written so that a vanishing vega forces
+bisection on its own, with no special case — which is what makes the wings
+tractable, at a measured cost of 9.8x versus the at-the-money path.
+
+**Only the out-of-the-money side is inverted.** Deep in-the-money quotes carry
+no volatility information at all: at forward 4500, strike 3000 and three weeks
+to expiry, volatilities of 8%, 15% and 30% produce byte-identical prices. The
+solver reports `IllConditioned` rather than returning a number, and the
+documented remedy is the one desks already use — invert the side whose value is
+entirely time value and recover the other through parity.
+
+**The conditioning test is relative to intrinsic value, never absolute.** An
+absolute price tolerance wide enough to be useful near the money would swallow
+a far-wing option legitimately worth 1e-73 and report zero volatility for it.
+Out of the money the intrinsic value is zero, so the same relative threshold
+collapses to "is the quote strictly positive," which is exactly right.
+
+## Test data
+
+**Synthetic, seeded, and honest about it.** Real chain data is not reliably
+licensable for CI, so every downstream component is tested against a
+deterministic generator. This is the same approach used elsewhere in this
+portfolio, and the tradeoff is stated rather than hidden: results demonstrate
+that the machinery is correct and self-consistent, not that it has been
+validated against live markets.
+
+**The generator deliberately does not use SVI, even though M4 fits SVI.** If
+the two shared a functional form, M4's tests would prove only that a model can
+recover its own parameters — circular, and silent on whether the fit copes with
+a surface shaped by something else. Real chains are not generated by SVI
+either. The generator instead uses an empirical form with two stylized facts
+built in: a negative skew slope, and that slope decaying as `1/√T`.
+
+**The wing term is a smoothed absolute value.** See the bug table — the obvious
+quadratic in log-moneyness makes total variance grow like `k⁴`, breaks Lee's
+moment formula, and produces call prices that rise with strike.
+
+**Markets are quoted in volatility terms.** The half-spread is
+`vega × vol_points`, floored at a tick, which automatically produces narrow
+price-space markets in the wings and wider ones near the money — what real
+chains look like, with no rule coding it in.
+
+## The surface
+
+**The fit is a two-dimensional search, not a five-dimensional one.** For any
+fixed vertex position and width `(m, σ)`, SVI is *linear* in its remaining
+three parameters, so those come from an exact least-squares solve. The outer
+search therefore walks a cheap two-dimensional objective, which is why it uses
+a deterministic shrinking grid rather than a general-purpose optimizer: there
+is no pathological geometry to defend against, and a grid gives byte-identical
+results across compilers and platforms. Benchmarks confirm the grid, not the
+algebra, is the cost — halving its resolution gives a 5.1x speedup.
+
+**Candidates are scored against the clamped parameters, not the raw
+least-squares solution.** Clamping changes the curve, so an objective computed
+before it would rank candidates by a fit that is not the one being returned.
+
+**Butterfly arbitrage is checked through Durrleman's condition**, which is a
+statement about the risk-neutral density the slice implies. A negative value is
+a negative probability. Checking the density directly is strictly stronger than
+spot-checking butterflies at the listed strikes, because it catches violations
+*between* strikes that no tradeable butterfly would reveal.
+
+**Calendar arbitrage is checked in total variance, at fixed log-moneyness.**
+Both qualifiers matter. Implied volatility routinely falls with maturity
+without any arbitrage — that is just the term structure — so a check phrased in
+volatility would raise false alarms on perfectly ordinary surfaces. There is a
+test pinning exactly that case.
+
+**Violations are reported, not repaired.** Parameters are pulled only into the
+region where the slice is a valid variance curve; the butterfly condition is
+deliberately not forced. A violation is a fact about the market data, and
+silently massaging it away would destroy the signal a market maker most needs.
+
+**Interpolation across maturities is linear in total variance**, the only
+choice that cannot manufacture calendar arbitrage between two arbitrage-free
+slices. **Forwards and discount factors interpolate in log space**, where they
+are genuinely linear — a straight line there is a constant rate between nodes.
+Maturity zero is a known node for both, so the short end is interpolated rather
+than extrapolated.
+
+## Risk
+
+**A single vega number is not risk management.** A book long 1,000 vega in the
+front month and short 1,000 in the two-year has net vega of zero and an
+enormous position. Vega is therefore reported on a tenor × log-moneyness grid,
+alongside a gross figure summing each cell's absolute value; the gap between
+net and gross is exactly the offsetting exposure the aggregate hides. On the
+demo book, net vega is 1.3% of gross.
+
+**Vega is also reported term-weighted** by `√(reference/T)`, because short-dated
+implied volatility moves far more than long-dated and a vega point at three
+weeks is not the same risk as one at two years.
+
+**Greeks are sticky-strike, and the header says so.** They are evaluated at the
+surface's volatility with the surface held fixed, so delta excludes the way
+implied volatility at a given strike tends to move when spot moves. The
+alternative depends on a view about how the surface travels; burying such a
+view inside a number labelled "delta" would be worse than excluding it openly.
+
+**Risk reuses the M1 spot-parameterization greeks** through an exact conversion
+from market coordinates, rather than restating the formulas in forward terms.
+The M1 versions are the ones validated against finite differences; restating
+them would mean re-earning that confidence for no benefit.
+
+## Quoting
+
+**Inventory skew is the reservation-price idea applied to vega rather than
+delta.** A book long volatility in a bucket quotes that bucket lower on both
+sides, so the flow it attracts sells to the maker. Structurally the same
+mechanism as Avellaneda-Stoikov, moved from delta inventory to vega inventory:
+the maker is not predicting where volatility goes, only arranging for the
+trades it does get to lean toward flat.
+
+**At the limit the adding side is withdrawn, not merely priced badly.** Sizes
+taper on the side that would add to the position and stay full on the side that
+would reduce it. A real maker at its risk limit pulls the bid.
+
+**Width includes a term from the slice's own fit residual.** That is the
+surface telling the quoter how much to trust it: an expiry whose SVI fit left
+large residuals is one where theo is genuinely uncertain, and quoting it as
+tightly as a clean expiry would be quoting confidence that does not exist.
+Uncertainty widens without skewing.
+
+**A minimum price half-width matters more than it looks.** A width set purely
+in volatility collapses to nothing exactly where vega is negligible — deep
+wings and near expiry — which is where a maker is most exposed to being picked
+off. Where the option is worthless the bid clamps at zero instead, giving a
+0.00 bid against a small offer, which is what a real market in that contract
+looks like.
+
+**Mismatched risk buckets are reported, not guessed at.** A risk grid bucketed
+differently from the quote settings would produce a confident wrong skew.
+
+## Simulation and attribution
+
+**The residual is named.** An attribution that does not report what it failed
+to explain is not an attribution — it is a set of numbers that happen to sum to
+the answer because one of them absorbed the difference silently. Here it runs
+at 2.3–2.5% of gross attribution.
+
+**Settlement is its own term.** Gamma diverges as time to expiry goes to zero,
+so a contract in its final step contributes a `0.5·Γ·dS²` of essentially
+unbounded size against a realized P&L that is simply the payoff. Expiring
+contracts are excluded from the greek terms entirely and booked exactly.
+
+**Adverse selection is measured against genuinely informed counterparties.** A
+configurable fraction of arriving orders knows the sign of the volatility move
+about to happen. Without them there is nothing to be adversely selected by: a
+maker facing purely random flow keeps its whole spread, and any markout is
+sampling error. The result is that the maker earns essentially the same gross
+edge in every regime and retains 98.8%, 79.0% and 63.4% of it as informed flow
+goes from none to 30% to 75%.
+
+**The maker quotes off the true surface.** Attribution therefore isolates
+market-making mechanics — spread, inventory, hedging, adverse selection — from
+model error, which M4 measures separately. Mixing the two would muddy both.
+
+**Statistical results are averaged across seeds.** A single trajectory's
+markout carries more sampling noise than the adverse-selection effect itself;
+one seed can easily show the maker keeping *more* than its edge at moderate
+toxicity, which is a statement about the draw rather than the mechanism.
+
+---
+
+## What this is not
+
+- **Not validated against live market data.** Everything is exercised against a
+  seeded synthetic generator. The machinery is correct and self-consistent;
+  that is a different claim from being calibrated to a real chain.
+- **The volatility surface moves by a parallel level shift.** Real surfaces
+  twist as well as translate. A parallel shift is the move vega is defined
+  against, which keeps the vega term exact rather than approximate, but it
+  understates the risk of a book that is flat vega and long skew.
+- **Delta is sticky-strike**, so hedging performance in the simulation is
+  optimistic relative to a desk that must take a view on surface dynamics.
+- **No transaction costs on options**, only on the underlying hedge.
+- **No queue position, latency, or venue modelling.** The maker's quote is
+  either lifted or not; there is no competition for priority.
+- **Single-threaded throughout.** Nothing here is latency-critical in the
+  sense a production quoting engine would be.
+
+---
+
+## Bugs the process caught
+
+Counted honestly and split by kind. Six were defects in library code; four were
+defects in tests or benchmarks — which are still real, because a test asserting
+the wrong thing is worse than no test.
+
+### Library
+
+| # | Milestone | Defect | How it surfaced |
+|---|---|---|---|
+| 1 | M2 | Deep in-the-money quotes returned `Success` with volatility 0. Volatilities of 8%, 15% and 30% produce byte-identical prices there, so the answer was fiction. | Round-trip recovery test failed at short-dated ITM strikes |
+| 2 | M2 | The "sitting at intrinsic" shortcut used an **absolute** price slack of ~4.5e-9, which swallowed far-wing options legitimately worth 8.5e-73 and reported them as zero volatility — the exact scale-dependence the header warned about for the convergence criterion, reintroduced in the bounds check | Deep-wing convergence test failed |
+| 3 | M3 | A plain quadratic wing term made total variance grow like `k⁴`, breaking Lee's moment formula. At two years and 2.2x the forward it lifted volatility fast enough that **call prices rose with strike** — a call spread with negative cost | Static-arbitrage test on generated chains |
+| 4 | M4 | The reduced regression returns `(a, b·ρ·σ, b·σ)`; the last two were scaled by `σ` *again* before a conversion that already divides by `σ`, leaving `b` too large by a factor of `σ`. The outer search hid it by distorting `σ`, so the fit looked plausible and was wrong by 1e-3 where it should have been 1e-8 | Exact-recovery test against known SVI parameters |
+| 5 | M7 | Expiring contracts left in the Taylor terms produced a gamma total of −12.9M against an unexplained of +12.4M — **87% of gross attribution**, with the residual absorbing an equal and opposite error | Residual-share test |
+| 6 | M7 | The OU volatility level had stationary standard deviation `0.60/√6 ≈ 24` volatility points on a 19-volatility surface, so implied volatility hit its floor routinely. There `d1` exceeds 20 standard deviations and **gamma and vega underflow to 4e-97 and 3e-94** while the book still moves six figures a step. Nothing threw; the inputs had silently vanished | Per-step attribution trace |
+
+Two of these — 4 and 6 — share a property worth naming: **a system with a free
+parameter can absorb a defect and keep producing plausible output.** The SVI
+search compensated for a bad conversion by distorting `σ`; the attribution
+looked merely noisy when its greeks had underflowed. Neither would have been
+found by inspection, and neither threw. Only a test against an independently
+known answer, and a per-step trace, exposed them.
+
+### Tests and benchmarks
+
+| # | Milestone | Defect |
+|---|---|---|
+| 7 | M5 | A test applied the contract multiplier twice in its expected value, because the quantity it compared against had already come back from `compute_risk` with the multiplier included |
+| 8 | M6 | A test asserted the full two-sided price floor always applies. It cannot: a worthless option's bid clamps at zero, so the market is one-sided by construction. The library was right |
+| 9 | M7 | A test asserted gamma and theta oppose on **run totals**. They oppose per step (78–92% of steps), but the totals are sums over steps of varying sign and can legitimately finish with the same sign. The assertion was simply false |
+| 10 | M8 | `BM_ComputeRisk` reported 17.6 µs flat from 100 to 5,000 positions. The generator stepped strikes on `i % 60` while choosing expiries on `i % 6`; since 60 is a multiple of 6 the pair repeated after 60 contracts and the book saturated. The benchmark was measuring its own generator's period |
+
+---
+
+## Testing philosophy
+
+Three rules the suite tries to follow.
+
+**Check against something independent.** Analytic greeks are validated against
+finite differences of the pricer, not against another closed form. The SVI fit
+is validated against a curve with known parameters. Put-call parity is asserted
+as an invariant that references no model internals at all. Bugs 4 and 10 were
+both caught this way and would not have been caught otherwise.
+
+**Assert what is true, not what sounds true.** Bugs 8 and 9 were tests
+asserting plausible-sounding properties that do not hold. Both were fixed by
+weakening the claim to the true one and documenting why — a one-sided market on
+a worthless option, and a per-step rather than aggregate relationship.
+
+**Pin the limitations as tests.** The ill-conditioned inversion, the far-wing
+price floor, and the settlement carve-out all have tests asserting the
+*documented* behaviour, so a limitation stays a known property rather than
+something rediscovered later.
