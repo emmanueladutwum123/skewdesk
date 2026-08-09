@@ -1,11 +1,14 @@
 #include "skewdesk/chain.hpp"
 #include "skewdesk/portfolio.hpp"
 #include "skewdesk/quoting.hpp"
+#include "skewdesk/simulation.hpp"
 #include "skewdesk/surface.hpp"
 
 #include <cmath>
 #include <cstdio>
+#include <cstdint>
 #include <initializer_list>
+#include <utility>
 #include <vector>
 
 // Runs the whole pipeline end to end: generate a chain from a known
@@ -135,6 +138,88 @@ int main() {
                 live.theoretical_volatility, flat.bid, flat.ask,
                 live.inventory_utilisation, live.bid, live.ask, live.bid_size,
                 live.ask_size);
+  }
+
+  // Run the maker against simulated flow and take the P&L apart.
+  //
+  // Averaged across seeds rather than reported from one run. A single
+  // trajectory's markout carries more sampling noise than the adverse-
+  // selection effect itself, so a one-seed table can easily show the maker
+  // keeping more than its edge at moderate toxicity -- a statement about the
+  // draw, not about the mechanism.
+  constexpr int kSeeds = 8;
+
+  struct Averaged {
+    skewdesk::PnlAttribution pnl{};
+    double residual_share{};
+    double edge_per_contract{};
+    double markout_per_contract{};
+    double retained{};
+    double informed_markout{};
+    int trades{};
+  };
+
+  const auto report = [](double informed_fraction) {
+    Averaged out{};
+    for (int seed = 0; seed < kSeeds; ++seed) {
+      skewdesk::SimulationConfig sim{};
+      sim.steps = 250;
+      sim.informed_fraction = informed_fraction;
+      sim.seed += static_cast<std::uint64_t>(seed);
+
+      const skewdesk::SimulationResult run = skewdesk::run_simulation(sim);
+      const skewdesk::PnlAttribution& pnl = run.attribution;
+      const double gross = std::fabs(pnl.edge) + std::fabs(pnl.delta) +
+                           std::fabs(pnl.gamma) + std::fabs(pnl.vega) +
+                           std::fabs(pnl.theta) + std::fabs(pnl.hedge_cost) +
+                           std::fabs(pnl.settlement);
+
+      out.pnl.total += pnl.total / kSeeds;
+      out.pnl.edge += pnl.edge / kSeeds;
+      out.pnl.delta += pnl.delta / kSeeds;
+      out.pnl.gamma += pnl.gamma / kSeeds;
+      out.pnl.vega += pnl.vega / kSeeds;
+      out.pnl.theta += pnl.theta / kSeeds;
+      out.pnl.settlement += pnl.settlement / kSeeds;
+      out.pnl.unexplained += pnl.unexplained / kSeeds;
+      out.residual_share += 100.0 * std::fabs(pnl.unexplained) / gross / kSeeds;
+      out.edge_per_contract += run.adverse.edge_per_contract / kSeeds;
+      out.markout_per_contract += run.adverse.markout_per_contract / kSeeds;
+      out.retained += run.adverse.retained_fraction / kSeeds;
+      out.informed_markout += run.adverse.informed_markout_per_contract / kSeeds;
+      out.trades += run.trades / kSeeds;
+    }
+    return out;
+  };
+
+  const Averaged clean = report(0.0);
+  const Averaged mixed = report(0.30);
+  const Averaged toxic = report(0.75);
+
+  std::printf("\n\nP&L attribution, 250 steps, averaged over %d seeds\n", kSeeds);
+  std::printf("%-16s %10s %10s %10s %10s %10s %10s %9s %11s %8s\n", "informed flow",
+              "total", "edge", "delta", "gamma", "vega", "theta", "settle", "unexplained",
+              "resid");
+  std::printf("%s\n",
+              "--------------------------------------------------------------------------"
+              "--------------------------------");
+
+  for (const auto& [label, run] : {std::pair{"none", &clean}, std::pair{"30%", &mixed},
+                                   std::pair{"75%", &toxic}}) {
+    const skewdesk::PnlAttribution& pnl = run->pnl;
+    std::printf("%-16s %10.0f %10.0f %10.0f %10.0f %10.0f %10.0f %9.0f %11.0f %7.1f%%\n",
+                label, pnl.total, pnl.edge, pnl.delta, pnl.gamma, pnl.vega, pnl.theta,
+                pnl.settlement, pnl.unexplained, run->residual_share);
+  }
+
+  std::printf("\nAdverse selection: how much of the quoted edge survives\n");
+  std::printf("%-16s %9s %12s %12s %12s %14s\n", "informed flow", "trades", "edge/ct",
+              "markout/ct", "retained", "informed m/o");
+  for (const auto& [label, run] : {std::pair{"none", &clean}, std::pair{"30%", &mixed},
+                                   std::pair{"75%", &toxic}}) {
+    std::printf("%-16s %9d %12.4f %12.4f %11.1f%% %14.4f\n", label, run->trades,
+                run->edge_per_contract, run->markout_per_contract, 100.0 * run->retained,
+                run->informed_markout);
   }
 
   return 0;

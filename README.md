@@ -31,7 +31,7 @@ Built incrementally, one milestone at a time.
 | M4 | SVI surface fit with butterfly and calendar arbitrage checks | **Done** |
 | M5 | Position book, portfolio greeks, vega bucketed by tenor and strike | **Done** |
 | M6 | Quoting engine: theo, risk-scaled width, inventory skew | **Done** |
-| M7 | Simulation and P&L attribution; adverse-selection measurement | Planned |
+| M7 | Simulation and P&L attribution; adverse-selection measurement | **Done** |
 | M8 | Benchmarks, `DESIGN.md`, `BENCHMARKS.md` | Planned |
 
 ## M1
@@ -458,6 +458,102 @@ from a flat book.
   option types.
 - A risk grid bucketed differently from the quote settings is **reported**
   rather than silently read from the wrong cell.
+
+## M7
+
+Running the maker against simulated order flow and taking the resulting P&L
+apart. Spot diffuses, the surface shifts, quotes get lifted and hit, delta is
+hedged in a band, and expiries roll off.
+
+**The decomposition:**
+
+```
+dP  =  edge  -  hedge cost
+     +  delta_net * dS  +  0.5 * gamma * dS^2
+     +  vega * d(vol level)  +  theta * dt
+     +  settlement  +  unexplained
+```
+
+`edge` is booked the instant a trade happens — the gap between where the maker
+transacted and where its own model said fair value was. It is gross revenue,
+and it is always positive at trade time. Everything after it is the cost of
+holding what the trade left behind.
+
+**`unexplained` is named, and that is the point.** An attribution that does not
+report what it failed to explain is not an attribution — it is a set of numbers
+that happen to sum to the answer because one of them absorbed the difference
+silently. Here the residual runs at **2.3–2.5% of gross attribution**, so the
+decomposition is describing the P&L rather than tiling it.
+
+**Adverse selection is measured against informed counterparties**, not inferred
+from noise. A configurable fraction of arriving orders knows the sign of the
+volatility move about to happen and trades accordingly. Without them there is
+nothing to be adversely selected by: a maker facing purely random flow keeps
+its whole spread, and any markout is sampling error.
+
+```
+P&L attribution, 250 steps, averaged over 8 seeds
+informed flow         total       edge      delta      gamma       vega      theta    settle unexplained    resid
+none                2143594    2358805      50114    -291720     -35065      16622     11666       38852     2.3%
+30%                 1880518    2282671    -127433     186888    -387495    -167321     51489       48696     2.3%
+75%                 1677836    2553514     -12937    -344895   -1092412     653433    -38741      -31709     2.5%
+
+Adverse selection: how much of the quoted edge survives
+informed flow       trades      edge/ct   markout/ct     retained   informed m/o
+none                  1496       3.1451       3.0917        98.8%         0.0000
+30%                   1496       3.0436       2.4062        79.0%         1.8699
+75%                   1496       3.4047       2.2148        63.4%         1.6553
+```
+
+The maker earns essentially the same gross edge in all three regimes — the
+spread it quotes does not change — but keeps 98.8%, 79.0% and 63.4% of it. That
+gap is the entire story of adverse selection, and it is invisible in revenue.
+
+Results are averaged across seeds because a single trajectory's markout carries
+more sampling noise than the effect being measured; one seed can easily show
+the maker keeping *more* than its edge at moderate toxicity, which is a
+statement about the draw rather than the mechanism.
+
+### Two findings from building it
+
+**Settlement cannot live in the Taylor terms.** Gamma diverges as time to
+expiry goes to zero, so a contract in its final step contributes a
+`0.5·Γ·dS²` of essentially unbounded size against a realized P&L that is simply
+the payoff. Left in, it did not merely add noise — it produced a gamma total of
+−12.9M against an unexplained of +12.4M, **87% of gross attribution**, with the
+residual quietly absorbing an equal and opposite error. Expiring contracts are
+now excluded from the greek terms entirely and their P&L booked exactly as
+settlement value less last mark. That took the residual under 5%.
+
+**The volatility process has to be chosen so the surface stays a surface.** An
+Ornstein-Uhlenbeck level has stationary standard deviation
+`vol_of_vol / sqrt(2·mean_reversion)`. The first configuration used 0.60 and
+3.0 — 24 volatility points of spread on a 19-volatility surface — so the level
+routinely drove implied volatility to its floor. There `d1` runs past 20
+standard deviations and every greek underflows: gamma and vega came back as
+`4e-97` and `3e-94` while the book still moved by six figures a step. The
+attribution had not broken; its inputs had silently vanished. The defaults now
+give roughly three volatility points of spread, with a hard floor under market
+volatility so an extreme draw costs realism rather than arithmetic.
+
+### Testing
+
+110 tests. Added here:
+
+- **The residual is bounded as a fraction of gross attribution**, not merely
+  reconciled — reconciliation is true by construction and proves nothing.
+- **Informed flow marks out worse than uninformed**, averaged over five seeds.
+  The effect held in 8 of 8 seeds measured, but individual seeds vary by more
+  than the gap, so a one-seed assertion would be testing the draw.
+- **A fully uninformed control** retains most of its edge, which is what gives
+  the informed result meaning.
+- **Gamma and theta oppose each other step by step** — asserted per step, not
+  on run totals, because the totals are sums over steps of varying sign and a
+  run can legitimately finish with both positive. Measured at 78–92% of steps
+  opposing.
+- A tighter hedge band trades delta risk for hedging cost, in both directions.
+- Expiries that roll off mid-run are booked as settlement, with the run
+  asserted to outlive its front expiry so the path is actually exercised.
 
 ## Build
 

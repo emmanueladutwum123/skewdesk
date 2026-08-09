@@ -24,6 +24,7 @@ add_library(skewdesk STATIC
   src/surface.cpp
   src/portfolio.cpp
   src/quoting.cpp
+  src/simulation.cpp
 )
 
 target_include_directories(skewdesk PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
